@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.8.186] — 2026-08-16
+
+### Changed
+
+- **Releases are now automatic.** Merging a version-bumped change to `main` creates the release tag and runs the full pipeline — GitHub Release with the VSIX attached, VS Code Marketplace, and Open VSX — with no manual tag push. Putting `[skip release]` in the merge commit message defers a release (push the tag later to publish it), merges that don't bump the version release nothing, and a manually pushed tag still releases exactly as before. The repository's **Latest** release badge now follows version order rather than publish order, so re-publishing or backfilling an older version can never displace the newest one. This release ships the `nexus.scripts.maxReadSizeMb` setting (2.8.184) and `nexus.include()` (2.8.185) to the marketplaces — see those entries below.
+
+## [2.8.185] — 2026-08-15
+
+### Added
+
+- **Scripts can now be split across files: `await nexus.include("./lib/helpers.js")`.** A script body cannot use `import` or `require`, so a long automation had to live in one file. `nexus.include()` loads another `.js` file as a module and resolves to its exports — CommonJS-flavoured, so a library exports with `exports.login = ...`, `module.exports = ...`, or simply by returning a value when it never touches `exports`. **Relative paths resolve against the file they are written in**, for `nexus.include` and for `nexus.fs` inside an included file alike, so a library folder that ships its own data files works no matter which script pulls it in; libraries may include their own siblings, up to 16 levels deep. A library is just an unmarked `.js` file: without the `@nexus-script` marker it never appears in the Scripts view, the CodeLens or any picker — and a *marked* file is refused as a library (`IncludeIsScript`), because that marker means "entry point". Every module is loaded once per run (later includes get the same exports object; a module that threw keeps throwing rather than half-running again), a run always picks up your latest **saved** library code, circular includes are refused with the loop spelled out (`main.js → lib/a.js → lib/b.js → lib/a.js`) rather than handing back a half-built object, and a diamond — two libraries sharing one helper — is not a cycle. Includes inherit everything `nexus.fs` reads have: the same configurable size cap, UTF-8 requirement, 30-second deadline, containment rules and Output Channel logging, plus caps of 16 levels of nesting, 64 distinct modules per run, and 48 MiB of combined module source per run (so a run that would outgrow the script worker's heap is refused with a named error instead of dying in an allocation failure). Bundled IntelliSense type definitions are now v7 (adding `nexus.include`, `module`/`exports` inside included files, and the include error codes); workspaces holding an older copy are rewritten on the next script command.
+
+### Fixed
+
+- **Script errors now name the real file and the real line.** An uncaught error used to report `<anonymous>` with a line number two higher than the file's — so the one number you needed to find the failing line was quietly wrong, for every script, whether or not it included anything. The Output Channel (one click from the failure toast's **Show Output** button) and `log.error(err)` now report the actual file name (the entry script's, or the included module's) and its true line and column, measured against the runtime's own function wrapper rather than assumed. Two limits are stated rather than papered over: a **syntax** error still carries no location at all (V8 provides none when a script fails to compile), so the message names the file it was compiling and leaves the line to your editor's diagnostics; and a stack a script reads out of `err.stack` itself is not rewritten — pass the error to `log.error(err)`, or let it propagate, for the corrected form.
+- **`log.error(err)` no longer writes `{}`.** Passing an Error to `log.info` / `log.warn` / `log.error` — the shape of nearly every `catch` block — serialised to an empty object, because an Error's message and stack are not enumerable properties. The single most common logging line in any script recorded nothing at all. Errors now render as their (line-corrected) stack, or their message when they carry none.
+
+## [2.8.184] — 2026-08-15
+
+### Added
+
+- **The `nexus.fs` read limit is now a setting: `nexus.scripts.maxReadSizeMb`.** Reads through `nexus.fs.readText` / `nexus.fs.readJson` were capped at a fixed 4 MiB; that is now the default of a setting you can move anywhere between 1 and 16 MiB. The value is snapshotted when a script run starts, so changing it never moves the limit under a script that is already running, an out-of-range value is clamped to the nearest bound, and a non-numeric, zero, or negative value falls back to 4 MiB rather than leaving reads uncapped or capped at zero. `FileTooLarge` errors now report the cap that was actually enforced — `err.maxBytes` and the error message quote the run's own effective cap, not a hardcoded 4 MiB. Bundled IntelliSense type definitions are now v6; workspaces still holding a v5 copy are rewritten on the next script command.
+
+## [2.8.183] — 2026-08-15
+
+### Added
+
+- **Scripts can now read files, through a supported, read-only, scoped API: `nexus.fs`.** `nexus.fs.readText(path)`, `nexus.fs.readJson(path)`, and `nexus.fs.exists(path)` resolve relative paths against the running script's own directory, and refuse anything outside that folder or the configured Nexus scripts folder — traversal, absolute paths, and sibling-directory tricks are all caught by the same lexical containment check. Reads are capped at 4 MiB and must be valid UTF-8; every access — success or refusal — is logged to the "Nexus Scripts" Output Channel with the resolved path. `readJson` throws a `SyntaxError` (`code: "InvalidJson"`) on malformed input, naming the file in the message. IntelliSense picks this up automatically: the bundled type definitions are now v5, and every workspace still seeded with an older copy is rewritten on the next script command.
+- **A `nexus.fs` call never blocks a script for more than 30 seconds, and a broken filesystem cannot take the extension host down with it.** A hung remote filesystem or a dead network mount produces reads and probes that would otherwise never return; every call now settles within 30 seconds — the wait for a slot included — throwing `ReadFailed` with a "timed out" message when the filesystem never answered. `exists()` makes the same distinction everywhere it matters: a file that is genuinely absent returns `false`, while a probe the filesystem failed to answer (permissions, an unavailable provider, a timeout) throws `ReadFailed` — a script never mistakes "I couldn't tell" for "definitely not there". Behind the scenes, parallel reads and probes are throttled through small host-side pools with hard bounds on memory (~48 MiB worst case however many files a script fans out over) and on the operations a stalled provider can leave behind; a degraded pool recovers by itself the moment the stall clears, oldest waiter first, and cleaning up after a mass timeout is instant rather than proportional to the pile.
+- **Scripts now refuse to start in a Restricted Mode (untrusted) workspace.** A script runs arbitrary JavaScript with your full user permissions, so every script-start command — the palette, the CodeLens, the tree's quick-run, and "Connect/Open and Run Script…" for SSH, Serial, and Local Shell — now hard-refuses with an explanatory message and a **Manage Workspace Trust** button when the workspace isn't trusted. The extension also now explicitly declares `capabilities.untrustedWorkspaces.supported: false` in its manifest, making previously-implicit VS Code behavior an audited, intentional statement.
+
+### Fixed
+
+- **An absolute `nexus.scripts.path` now works in Remote-SSH workspaces.** Configuring the scripts folder as an absolute remote path produced a local-disk location internally, so the folder resolved to the wrong machine; the path now stays on the remote host (Windows-style drive paths included), and scripts there can read files across the configured folder as documented.
+
+### Changed
+
+- **`docs/scripting.md`'s security section no longer claims scripts can't read files or spawn processes.** They always could — `await import("node:fs")` and `await import("node:child_process")` work inside the Worker, same as any other Node code — the docs just didn't say so. The rewrite states the real boundary (no `vscode` import, nothing else), documents `nexus.fs` as the supported/audited path for file reads, and calls out that `worker.terminate()` (used to stop a script) does not kill child processes the script spawned. Direct Node module imports remain possible but unsupported.
+
 ## [2.8.182] — 2026-08-14
 
 ### Added
